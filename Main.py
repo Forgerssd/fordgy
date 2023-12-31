@@ -1,3 +1,4 @@
+import os
 import discord
 from discord.ext import commands
 from config import settings
@@ -7,66 +8,85 @@ from collections import deque
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix = settings['prefix'], intents = intents)
+bot = commands.Bot(command_prefix=settings['prefix'], intents=intents)
 bot.queue = deque()
+
+
 
 @bot.event
 async def on_ready():
     print(f'{bot.user.name} has connected to Discord!')
 
+async def play_next(ctx, player):
+    if bot.queue:
+        next_player = bot.queue.popleft()
+        ctx.voice_client.play(next_player, after=lambda e: bot.loop.create_task(play_next(ctx, next_player)) if e else None)
+        ctx.voice_client.source.volume = playVol
+        # Отправляем первое сообщение и сохраняем объект сообщения
+        message = await ctx.send(f'Now playing: {next_player.title}')
+
+        # Дожидаемся окончания трека
+        while ctx.voice_client.is_playing():
+            await asyncio.sleep(1)
+
+        # После окончания трека редактируем сообщение
+        await message.edit(content=f'Now playing: {next_player.title}')
+
+        # Удаляем файл трека
+        if os.path.exists(next_player.data.get('url')):
+            os.remove(next_player.data.get('url'))
+
+        # После окончания трека вызываем play_next
+        await play_next(ctx, next_player)
+    else:
+        # Если очередь пуста, редактируем первое сообщение
+        await ctx.send("Queue is empty.")
 
 @bot.command(name='play')
 async def play(ctx, *, url):
     voice_channel = ctx.author.voice.channel
-    async with ctx.typing():
-        from YTDLS import YTDLSource
-        player = await YTDLSource.from_url(url, loop=bot.loop)
-        if ctx.voice_client is None or not ctx.voice_client.is_connected():
-            ctx.voice_channel = await voice_channel.connect()
+    from YTDLS import YTDLSource
+    player = await YTDLSource.from_url(url, loop=bot.loop)
+    player.on_end = lambda: bot.loop.create_task(play_next(ctx, player))
+    if ctx.voice_client is None or not ctx.voice_client.is_connected():
+        await voice_channel.connect()
 
-        bot.queue.append(player)
-        if not ctx.voice_client.is_playing():
-            await play_next(ctx)
+    bot.queue.append(player)
 
-    await ctx.send(f'Added to queue: {player.title}')
+    print(f'Queue length: {len(bot.queue)}')  # Добавим отладочный вывод
 
-async def play_next(ctx):
+    # Добавим небольшую асинхронную задержку
+    await asyncio.sleep(1)
+
+    # Проверим, играет ли аудио
+    if not ctx.voice_client.is_playing():
+        await play_next(ctx, player)
+    
+    # Если есть треки в очереди, редактируем первое сообщение
     if bot.queue:
-        player = bot.queue.popleft()
-        ctx.voice_client.play(player, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop) if e else None)
         await ctx.send(f'Now playing: {player.title}')
-    else:
-        await ctx.send("Queue is empty.")
+
+
+
 
 @bot.command()
 async def skip(ctx):
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.stop()
-        await ctx.send("Skipped the current track.")
-        await play_next(ctx)
-    else:
+    else: 
         await ctx.send("Nothing is currently playing.")
-
-
-
-
-
-
-
-
-
-
-
-
-
+    
+    await play_next(ctx, None)
 
 @bot.command(name='volume')
 async def volume(ctx, vol: int):
-    if ctx.voice_client is None:
+    if ctx.voice_client is None or not ctx.voice_client.is_connected():
         return await ctx.send("I'm not connected to a voice channel.")
     
     if 0 <= vol <= 100:
-        ctx.voice_client.source.volume = vol / 100
+        global playVol
+        playVol = vol / 100
+        ctx.voice_client.source.volume = playVol
         await ctx.send(f"Volume set to {vol}%")
     else:
         await ctx.send("Volume must be between 0 and 100")
@@ -76,5 +96,10 @@ async def leave(ctx):
     voice_channel = discord.utils.get(bot.voice_clients, guild=ctx.guild)
     if voice_channel.is_connected():
         await voice_channel.disconnect()
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if not member.bot and after.channel is None and bot.voice_clients:
+        await play_next(bot.voice_clients[0])
 
 bot.run(settings['token'])
