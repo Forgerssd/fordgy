@@ -5,36 +5,38 @@ from config import settings
 import asyncio
 import yt_dlp as youtube_dl
 from collections import deque
+from YTDLS import YTDLSource
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=settings['prefix'], intents=intents)
 bot.queue = deque()
 
-
+global playVol
+playVol = 0.1
+global stop_playing
+stop_playing = False
 
 @bot.event
 async def on_ready():
     print(f'{bot.user.name} has connected to Discord!')
 
 async def play_next(ctx, player):
+    global stop_playing
     if bot.queue:
         next_player = bot.queue.popleft()
         ctx.voice_client.play(next_player, after=lambda e: bot.loop.create_task(play_next(ctx, next_player)) if e else None)
         ctx.voice_client.source.volume = playVol
         # Отправляем первое сообщение и сохраняем объект сообщения
         message = await ctx.send(f'Now playing: {next_player.title}')
-
         # Дожидаемся окончания трека
-        while ctx.voice_client.is_playing():
+        while ctx.voice_client and ctx.voice_client.is_playing() and not stop_playing:  
             await asyncio.sleep(1)
+
+        stop_playing = False
 
         # После окончания трека редактируем сообщение
         await message.edit(content=f'Now playing: {next_player.title}')
-
-        # Удаляем файл трека
-        if os.path.exists(next_player.data.get('url')):
-            os.remove(next_player.data.get('url'))
 
         # После окончания трека вызываем play_next
         await play_next(ctx, next_player)
@@ -45,14 +47,12 @@ async def play_next(ctx, player):
 @bot.command(name='play')
 async def play(ctx, *, url):
     voice_channel = ctx.author.voice.channel
-    from YTDLS import YTDLSource
-    player = await YTDLSource.from_url(url, loop=bot.loop)
+
+    player = await YTDLSource.from_url(url, loop=bot.loop, bot=bot)
     player.on_end = lambda: bot.loop.create_task(play_next(ctx, player))
     if ctx.voice_client is None or not ctx.voice_client.is_connected():
         await voice_channel.connect()
-
-    bot.queue.append(player)
-
+    
     print(f'Queue length: {len(bot.queue)}')  # Добавим отладочный вывод
 
     # Добавим небольшую асинхронную задержку
@@ -93,9 +93,14 @@ async def volume(ctx, vol: int):
 
 @bot.command(name='leave')
 async def leave(ctx):
-    voice_channel = discord.utils.get(bot.voice_clients, guild=ctx.guild)
-    if voice_channel.is_connected():
-        await voice_channel.disconnect()
+    #voice_channel = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+    global stop_playing
+    if ctx.voice_client.is_playing():
+        ctx.voice_client.stop()
+        stop_playing = True
+        bot.queue.clear()
+    if ctx.voice_client.is_connected():
+        await ctx.voice_client.disconnect()
 
 @bot.event
 async def on_voice_state_update(member, before, after):

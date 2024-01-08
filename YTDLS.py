@@ -35,28 +35,27 @@ class YTDLSource(discord.PCMVolumeTransformer):
         self.volume = volume
 
     @classmethod
-    async def from_url(cls, url, *, loop=None, stream=False, bot=None):
+    async def from_url(cls, url, *, loop=None, stream=True, bot=None):
         loop = loop or asyncio.get_event_loop()
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
 
         if 'entries' in data:
-            # enqueue all items from a playlist
             entries = data['entries']
             for entry in entries:
-                if stream:
-                    filename = entry['url']
-                else:
-                    filename = ytdl.prepare_filename(entry)
-                    entry['url'] = filename  # Update the entry's URL to the actual file path
+                url = entry['url']
+                filename = ytdl.prepare_filename(entry) if not stream else url
+                entry['url'] = filename
                 player = cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=entry)
                 bot.queue.append(player)
 
             return bot.queue[-1]  # Return the last player in the queue (optional)
         else:
-            # handle single video case
             if stream:
                 filename = data['url']
             else:
                 filename = ytdl.prepare_filename(data)
                 data['url'] = filename  # Update the data's URL to the actual file path
-            return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
+        
+            player = cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
+            bot.queue.append(player)
+            return player
